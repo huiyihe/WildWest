@@ -1,0 +1,471 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<title>Wild West - three.js</title>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
+	
+	<style>
+		body {
+			margin: 0;
+			overflow: hidden;
+		}
+	</style>
+</head>
+<body>
+
+<script src="three.min.js"></script>
+<script src="Detector.js"></script>
+<script src="stats.min.js"></script>
+<script src="THREEx.FullScreen.js"></script>
+<script src="THREEx.WindowResize.js"></script>
+<script src="THREEx.KeyboardState.js"></script>
+
+<script id="vertexShader" type="x-shader/x-vertex">
+varying vec2 vUv;
+void main() {
+	vUv = uv;
+	gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}
+</script>
+
+<script id="fragmentShader" type="x-shader/x-vertex">
+uniform sampler2D baseTexture;
+uniform float baseSpeed;
+uniform sampler2D noiseTexture;
+uniform float noiseScale;
+uniform float alpha;
+uniform float time;
+
+varying vec2 vUv;
+void main() {
+	vec2 uvTimeShift = vUv + vec2(-0.7, 1.5) * time * baseSpeed;
+	vec4 noiseGeneratorTimeShift = texture2D(noiseTexture, uvTimeShift);
+	vec2 uvNoiseTimeShift = vUv + noiseScale * vec2(noiseGeneratorTimeShift.r, noiseGeneratorTimeShift.b);
+	vec4 baseColor = texture2D(baseTexture, uvNoiseTimeShift);
+	baseColor.a = alpha;
+	gl_FragColor = baseColor;
+}
+</script>
+
+<div id="hud" style="position: absolute; margin-top: 10px; width: 100%; text-align: center; color: white; font-family: 'Arial'; font-weight: bold; font-size: 24px; z-index: 2"></div>
+<div id="threejs" style="position: absolute; left: 0; top: 0"></div>
+
+<script>
+var container, scene, camera, renderer, stats;
+var keyboard = new THREEx.KeyboardState();
+var clock = new THREE.Clock(), timer;
+var collidableMeshList = [];
+var chests = [];
+var MAX_CHESTS = 10, chestCount = MAX_CHESTS;
+var horse, horseBox;
+var gameOver;
+
+init();
+animate();
+
+function init() {
+	// scene
+	scene = new THREE.Scene();
+	
+	// camera
+	camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 20000);
+	scene.add(camera);
+	camera.position.set(0, 150, 400);
+	camera.lookAt(scene.position);
+	
+	// renderer
+	if (Detector.webgl)
+		renderer = new THREE.WebGLRenderer({antialias:true});
+	else
+		renderer = new THREE.CanvasRenderer();
+	
+	renderer.setSize(window.innerWidth, window.innerHeight);
+	container = document.getElementById('threejs');
+	container.appendChild(renderer.domElement);
+	
+	// events
+	THREEx.FullScreen.bindKey({charCode: 'f'.charCodeAt(0)});
+	THREEx.WindowResize(renderer, camera);
+	
+	// stats
+	stats = new Stats();
+	stats.domElement.style.position = 'absolute';
+	stats.domElement.style.top = '0px';
+	container.appendChild(stats.domElement);
+	
+	// floor
+	var floorTexture = new THREE.ImageUtils.loadTexture('sand.jpg');
+	floorTexture.wrapS = THREE.RepeatWrapping;
+	floorTexture.wrapT = THREE.RepeatWrapping;
+	floorTexture.repeat.set(50, 50);
+	var floorGeometry = new THREE.PlaneGeometry(5000, 5000, 50, 50);
+	var floorMaterial = new THREE.MeshLambertMaterial({map: floorTexture, side: THREE.DoubleSide});
+	var floor = new THREE.Mesh(floorGeometry, floorMaterial);
+	scene.add(floor);
+	floor.rotation.x = Math.PI / 2;
+	
+	// skybox
+	var imagePrefix = "skybox/";
+	var directions = ["posx", "negx", "posy", "negy", "posz", "negz"];
+	var imageSuffix = ".jpg";
+	var skyGeometry = new THREE.CubeGeometry(10000, 10000, 10000);
+	
+	var materialArray = [];
+	for (var i = 0; i < directions.length; i++) {
+		var texture = new THREE.ImageUtils.loadTexture(imagePrefix + directions[i] + imageSuffix);
+		var material = new THREE.MeshBasicMaterial({map: texture, side: THREE.BackSide});
+		materialArray.push(material);
+	}
+	
+	var skyMaterial = new THREE.MeshFaceMaterial(materialArray);
+	var skybox = new THREE.Mesh(skyGeometry, skyMaterial);
+	scene.add(skybox);
+	
+	// light source
+	renderer.shadowMapEnabled = true;
+	
+	var spotlight = new THREE.SpotLight(0xFFD994);
+	spotlight.position.set(-5000, 1000, 1000);
+	// spotlight.shadowCameraVisible = true;
+	spotlight.shadowCameraFar = 10000;
+	spotlight.shadowDarkness = 0.9;
+	spotlight.intensity = 0.5;
+	spotlight.castShadow = true;
+	scene.add(spotlight);
+	floor.receiveShadow = true;
+	
+	// some extra lighting
+	var spotlight2 = new THREE.SpotLight(0xFFD994);
+	spotlight2.position.set(-3000, 1000, 5000);
+	spotlight2.intensity = 1.25;
+	scene.add(spotlight2);
+	
+	var spotlight3 = new THREE.SpotLight(0xFFD994);
+	spotlight3.position.set(-1000, 1000, -5000);
+	spotlight3.intensity = 1.25;
+	scene.add(spotlight3);
+	
+	// scene objects
+	var cubeGeometry = new THREE.CubeGeometry(15, 70, 25);
+	var cubeMaterial = new THREE.MeshBasicMaterial({transparent: true, opacity: 0.0});
+	horseBox = new THREE.Mesh(cubeGeometry, cubeMaterial);
+	horseBox.position.set(0, 35, 0);
+	scene.add(horseBox);
+	
+	// add 3D models
+	var jsonLoader = new THREE.JSONLoader();
+	jsonLoader.load("horse.js", addHorse);
+	jsonLoader.load("chest.js", addChests);
+	
+	// draw procedural water texture
+	var noiseTexture = new THREE.ImageUtils.loadTexture('cloud.png');
+	noiseTexture.wrapS = THREE.RepeatWrapping;
+	noiseTexture.wrapT = THREE.RepeatWrapping;
+	
+	var waterTexture = new THREE.ImageUtils.loadTexture('water.jpg');
+	waterTexture.wrapS = THREE.RepeatWrapping;
+	waterTexture.wrapT = THREE.RepeatWrapping;
+	
+	this.customUniforms = {
+		baseTexture: {type: "t", value: waterTexture},
+		baseSpeed: {type: "f", value: 0.25},
+		noiseTexture: {type: "t", value: noiseTexture},
+		noiseScale: {type: "f", value: 0.2},
+		alpha: {type: "f", value: 0.8},
+		time: {type: "f", value: 1.0}
+	};
+	
+	var customMaterial = new THREE.ShaderMaterial(
+		{
+			uniforms: customUniforms,
+			vertexShader: document.getElementById('vertexShader').textContent,
+			fragmentShader: document.getElementById('fragmentShader').textContent
+		}
+	);
+	
+	customMaterial.side = THREE.DoubleSide;
+	customMaterial.transparent = true;
+	
+	var waterGeometry = new THREE.PlaneGeometry(500, 2300);
+	
+	// water on left side of bridge
+	var waterLeft = new THREE.Mesh(waterGeometry, customMaterial);
+	waterLeft.rotation.x = Math.PI / 2;
+	waterLeft.position.set(0, 1, -1300);
+	scene.add(waterLeft);
+	collidableMeshList.push(waterLeft);
+	
+	// water on right side of bridge
+	var waterRight = new THREE.Mesh(waterGeometry, customMaterial);
+	waterRight.rotation.x = Math.PI / 2;
+	waterRight.position.set(0, 1, 1300);
+	scene.add(waterRight);
+	collidableMeshList.push(waterRight);
+	
+	var bridgeGeometry = new THREE.PlaneGeometry(500, 300);
+	var bridgeTexture = new THREE.ImageUtils.loadTexture('wood.jpg');
+	var bridgeMaterial = new THREE.MeshLambertMaterial({map: bridgeTexture, side: THREE.DoubleSide});
+	var bridge = new THREE.Mesh(bridgeGeometry, bridgeMaterial);
+	bridge.rotateOnAxis(new THREE.Vector3(1, 0, 0), Math.PI / 2);
+	bridge.position.set(0, 1, 0);
+	scene.add(bridge);
+	
+	// draw grass patches
+	var grassGeometry = new THREE.PlaneGeometry(70, 70, 1, 4);
+	grassGeometry.dynamic = true;
+	grassGeometry.vertices[3].z = 1;
+	var grassTexture = new THREE.ImageUtils.loadTexture('grass.png');
+	var grassMaterial = new THREE.MeshBasicMaterial({map: grassTexture, alphaTest: 0.8, side: THREE.DoubleSide});
+	
+	for (var i = 0; i < 50; i++) {
+		var grass = new THREE.Mesh(grassGeometry, grassMaterial);
+		grass.position.x = Math.random() * 2000 + 275;
+		grass.position.z = Math.random() * 2000 + 275;
+		grass.position.y = 30;
+		grass.rotateOnAxis(new THREE.Vector3(0, 1, 0), Math.random() * Math.PI);
+		
+		// 1 = negate x, 2 = negate z, 3 = negate x and z, 4 = no negation
+		var negate = Math.floor(Math.random() * 4 + 1);
+		
+		if (negate == 1 || negate == 3)
+			grass.position.x = -grass.position.x;
+		if (negate == 2 || negate == 3)
+			grass.position.z = -grass.position.z;
+		
+		scene.add(grass);
+	}
+	
+	createBorder();
+	clock.start();
+}
+
+function addHorse(geometry, materials) {
+	// load horse
+	var material = new THREE.MeshFaceMaterial(materials);
+	horse = new THREE.Mesh(geometry, material);
+	horse.scale.set(5, 5, 5);
+	
+	// draw box around horse for collision detection
+	var cubeGeometry = new THREE.CubeGeometry(15, 70, 25);
+	var cubeMaterial = new THREE.MeshBasicMaterial({transparent: true, opacity: 0.0});
+	horseBox = new THREE.Mesh(cubeGeometry, cubeMaterial);
+	horseBox.position.set(0, 35, 0);
+	scene.add(horseBox);
+	
+	// have horse follow box
+	horse.position = horseBox.position;
+	scene.add(horse);
+}
+
+function addChests(geometry, materials) {
+	var material = new THREE.MeshFaceMaterial(materials);
+	
+	for (var i = 0; i < MAX_CHESTS; i++) {
+		var chest = new THREE.Mesh(geometry, material);
+		chest.scale.set(25, 25, 25);
+		chest.position.set(Math.random() * 2000 + 275, 10, Math.random() * 2000 + 275);
+		chest.rotateOnAxis(new THREE.Vector3(0, 1, 0), Math.random() * Math.PI);
+		chest.castShadow = true;
+		
+		// 1 = negate x, 2 = negate z, 3 = negate x and z, 4 = no negation
+		var negate = Math.floor(Math.random() * 4 + 1);
+		
+		if (negate == 1 || negate == 3)
+			chest.position.x = -chest.position.x;
+		if (negate == 2 || negate == 3)
+			chest.position.z = -chest.position.z;
+		
+		scene.add(chest);
+		chests.push(chest);
+		collidableMeshList.push(chest);
+	}
+}
+
+function createBorder() {
+	var crateGeometry = new THREE.CubeGeometry(50, 50, 50);
+	var crateTexture = new THREE.ImageUtils.loadTexture('crate.jpg');
+	var crateMaterial = new THREE.MeshLambertMaterial({map: crateTexture});
+	
+	var crate = new THREE.Mesh(crateGeometry, crateMaterial);
+	crate.castShadow = true;
+	
+	var crate2 = crate.clone();
+	crate2.position.x += 50;
+	
+	var crate3 = crate.clone();
+	crate3.position.x += 25;
+	crate3.position.y += 50;
+	
+	// draw neg-z border
+	var xPos = -2475;
+	var zPos = -2475;
+	
+	for (var i = 0; i < 50; i++) {
+		var crateStack = new THREE.Object3D();
+		var leftCrate = crate.clone();
+		var rightCrate = crate2.clone();
+		var topCrate = crate3.clone();
+		
+		crateStack.add(leftCrate);
+		crateStack.add(rightCrate);
+		crateStack.add(topCrate);
+		
+		crateStack.position.set(xPos, 25, zPos);
+		scene.add(crateStack);
+		
+		xPos += 100;
+	}
+	
+	// draw pos-x border
+	var xPos = 2475;
+	var zPos = -2475;
+	
+	for (var i = 0; i < 50; i++) {
+		var crateStack = new THREE.Object3D();
+		var leftCrate = crate.clone();
+		var rightCrate = crate2.clone();
+		var topCrate = crate3.clone();
+		
+		crateStack.add(leftCrate);
+		crateStack.add(rightCrate);
+		crateStack.add(topCrate);
+		
+		crateStack.position.set(xPos, 25, zPos);
+		crateStack.rotateOnAxis(new THREE.Vector3(0, 1, 0), Math.PI / 2);
+		scene.add(crateStack);
+		
+		zPos += 100;
+	}
+	
+	// draw pos-z border
+	var xPos = -2475;
+	var zPos = 2475;
+	
+	for (var i = 0; i < 50; i++) {
+		var crateStack = new THREE.Object3D();
+		var leftCrate = crate.clone();
+		var rightCrate = crate2.clone();
+		var topCrate = crate3.clone();
+		
+		crateStack.add(leftCrate);
+		crateStack.add(rightCrate);
+		crateStack.add(topCrate);
+		
+		crateStack.position.set(xPos, 25, zPos);
+		scene.add(crateStack);
+		
+		xPos += 100;
+	}
+	
+	// draw neg-x border
+	var xPos = -2475;
+	var zPos = -2475;
+	
+	for (var i = 0; i < 50; i++) {
+		var crateStack = new THREE.Object3D();
+		var leftCrate = crate.clone();
+		var rightCrate = crate2.clone();
+		var topCrate = crate3.clone();
+		
+		crateStack.add(leftCrate);
+		crateStack.add(rightCrate);
+		crateStack.add(topCrate);
+		
+		crateStack.position.set(xPos, 25, zPos);
+		crateStack.rotateOnAxis(new THREE.Vector3(0, 1, 0), Math.PI / 2);
+		scene.add(crateStack);
+		
+		zPos += 100;
+	}
+}
+
+function animate() {
+	requestAnimationFrame(animate);
+	render();
+	
+	if (gameOver)
+		document.getElementById('hud').innerHTML = 'You fell in the water, game over!';
+	else
+		update();
+}
+
+function update() {
+	// movement
+	var delta = clock.getDelta();
+	var rotateAngle = Math.PI / 3 * delta;
+	
+	var origPos = horseBox.position.clone();
+	
+	if (keyboard.pressed("W"))
+		horse.translateZ(-delta * 400);
+	if (keyboard.pressed("S"))
+		horse.translateZ(delta * 200);
+	if (keyboard.pressed("A"))
+		horse.rotateOnAxis(new THREE.Vector3(0, 1, 0), rotateAngle);
+	if (keyboard.pressed("D"))
+		horse.rotateOnAxis(new THREE.Vector3(0, 1, 0), -rotateAngle);
+	
+	// check if player is out of bounds
+	if (horseBox.position.x > 2425 || horseBox.position.x < -2425 ||
+			horseBox.position.z > 2425 || horseBox.position.z < -2425) {
+		
+		horseBox.position = origPos;
+		horse.position = horseBox.position;
+	}
+	
+	// collision detection
+	var originPoint = horseBox.position.clone();
+	
+	for (var i = 0; i < horseBox.geometry.vertices.length; i++) {
+		var localVertex = horseBox.geometry.vertices[i].clone();
+		var globalVertex = localVertex.applyMatrix4(horseBox.matrix);
+		var directionVector = globalVertex.sub(horseBox.position);
+		
+		var ray = new THREE.Raycaster(originPoint, directionVector.clone().normalize());
+		var collisionResults = ray.intersectObjects(collidableMeshList);
+		
+		// check if collision was made
+		if (collisionResults.length > 0 && collisionResults[0].distance < directionVector.length()) {
+			if (chests.indexOf(collisionResults[0].object) > -1) {
+				// collision with chest
+				scene.remove(collisionResults[0].object);
+				var removeIndex = collidableMeshList.indexOf(collisionResults[0].object);
+				collidableMeshList.splice(removeIndex, 1);
+				chestCount--;
+			} else {
+				// collision with water
+				gameOver = true;
+			}
+		}
+	}
+	
+	// camera chase
+	var relativeCameraOffset = new THREE.Vector3(0, 5, 30);
+	var cameraOffset = relativeCameraOffset.applyMatrix4(horse.matrixWorld);
+	
+	camera.position.set(cameraOffset.x, cameraOffset.y, cameraOffset.z);
+	camera.lookAt(horse.position);
+	
+	// shaders
+	customUniforms.time.value += delta;
+	
+	stats.update();
+	
+	// update hud
+	if (chestCount > 0) {
+		timer = Math.floor(clock.getElapsedTime());
+		document.getElementById('hud').innerHTML = 'Chests Remaining: ' + chestCount + '<br/> Timer: ' + timer;
+	} else  {
+		document.getElementById('hud').innerHTML = 'It took you ' + timer + ' seconds to collect ' + MAX_CHESTS + ' chests!';
+		clock.getElapsedTime(); // keep timer running for movement
+	}
+}
+
+function render() {
+	renderer.render(scene, camera);
+}
+</script>
+
+</body>
+</html>
